@@ -104,39 +104,55 @@ struct PresolveContext {
     return domains[PositiveRef(ref)].Negation();
   }
 
-  // Returns true iff the domain changed.
-  bool IntersectDomainWith(int ref, const Domain& domain) {
+  // Returns false if the new domain is empty. Sets 'domain_modified' (if
+  // provided) to true iff the domain is modified otherwise does not change it.
+  bool IntersectDomainWith(
+      int ref, const Domain& domain, bool* domain_modified = nullptr) {
     CHECK(!DomainIsEmpty(ref));
     const int var = PositiveRef(ref);
 
     if (RefIsPositive(ref)) {
-      if (domains[var].IsIncludedIn(domain)) return false;
+      if (domains[var].IsIncludedIn(domain)) {
+        return true;
+      }
       domains[var] = domains[var].IntersectionWith(domain);
     } else {
       const Domain temp = domain.Negation();
-      if (domains[var].IsIncludedIn(temp)) return false;
+      if (domains[var].IsIncludedIn(temp)) {
+        return true;
+      }
       domains[var] = domains[var].IntersectionWith(temp);
     }
 
+    if (domain_modified != nullptr) {
+      *domain_modified = true;
+    }
+
     modified_domains.Set(var);
-    if (domains[var].IsEmpty()) is_unsat = true;
+    if (domains[var].IsEmpty()) {
+      is_unsat = true;
+      return false;
+    }
     return true;
   }
 
-  void SetLiteralToFalse(int lit) {
+  bool SetLiteralToFalse(int lit) {
     const int var = PositiveRef(lit);
     const int64 value = RefIsPositive(lit) ? 0ll : 1ll;
     if (IsFixed(var)) {
       const int64 fixed_value = MinOf(var);
       if (value != fixed_value) {
         is_unsat = true;
+        return false;
+      } else {
+        return true;
       }
     } else {
-      IntersectDomainWith(var, Domain(value));
+      return IntersectDomainWith(var, Domain(value));
     }
   }
 
-  void SetLiteralToTrue(int lit) { return SetLiteralToFalse(NegatedRef(lit)); }
+  bool SetLiteralToTrue(int lit) { return SetLiteralToFalse(NegatedRef(lit)); }
 
   void UpdateRuleStats(const std::string& name) { stats_by_rule_name[name]++; }
 
@@ -299,7 +315,12 @@ struct PresolveContext {
   // Create the internal structure for any new variables in working_model.
   void InitializeNewDomains() {
     for (int i = domains.size(); i < working_model->variables_size(); ++i) {
-      domains.push_back(ReadDomainFromProto(working_model->variables(i)));
+      Domain domain = ReadDomainFromProto(working_model->variables(i));
+      if (domain.IsEmpty()) {
+        is_unsat = true;
+        return;
+      }
+      domains.push_back(domain);
       if (IsFixed(i)) ExploitFixedDomain(i);
     }
     modified_domains.Resize(domains.size());
@@ -381,6 +402,7 @@ MUST_USE_RESULT bool RemoveConstraint(ConstraintProto* ct,
 }
 
 bool PresolveEnforcementLiteral(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (!HasEnforcementLiteral(*ct)) return false;
 
   int new_size = 0;
@@ -398,7 +420,7 @@ bool PresolveEnforcementLiteral(ConstraintProto* ct, PresolveContext* context) {
     } else if (context->VariableIsUniqueAndRemovable(literal)) {
       // We can simply set it to false and ignore the constraint in this case.
       context->UpdateRuleStats("enforcement literal not used");
-      context->SetLiteralToFalse(literal);
+      CHECK(context->SetLiteralToFalse(literal));
       return RemoveConstraint(ct, context);
     }
 
@@ -409,6 +431,8 @@ bool PresolveEnforcementLiteral(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveBoolOr(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   // Move the enforcement literal inside the clause if any. Note that we do not
   // mark this as a change since the literal in the constraint are the same.
   if (HasEnforcementLiteral(*ct)) {
@@ -440,7 +464,7 @@ bool PresolveBoolOr(ConstraintProto* ct, PresolveContext* context) {
     // objective var usage by 1).
     if (context->VariableIsUniqueAndRemovable(literal)) {
       context->UpdateRuleStats("bool_or: singleton");
-      context->SetLiteralToTrue(literal);
+      if (!context->SetLiteralToTrue(literal)) return true;
       return RemoveConstraint(ct, context);
     }
     context->tmp_literals.push_back(literal);
@@ -453,7 +477,7 @@ bool PresolveBoolOr(ConstraintProto* ct, PresolveContext* context) {
   }
   if (context->tmp_literals.size() == 1) {
     context->UpdateRuleStats("bool_or: only one literal");
-    context->SetLiteralToTrue(context->tmp_literals[0]);
+    if (!context->SetLiteralToTrue(context->tmp_literals[0])) return true;
     return RemoveConstraint(ct, context);
   }
   if (context->tmp_literals.size() == 2) {
@@ -492,10 +516,12 @@ MUST_USE_RESULT bool MarkConstraintAsFalse(ConstraintProto* ct,
 }
 
 bool PresolveBoolAnd(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   if (!HasEnforcementLiteral(*ct)) {
     context->UpdateRuleStats("bool_and: non-reified.");
     for (const int literal : ct->bool_and().literals()) {
-      context->SetLiteralToTrue(literal);
+      if (!context->SetLiteralToTrue(literal)) return true;
     }
     return RemoveConstraint(ct, context);
   }
@@ -513,7 +539,7 @@ bool PresolveBoolAnd(ConstraintProto* ct, PresolveContext* context) {
     }
     if (context->VariableIsUniqueAndRemovable(literal)) {
       changed = true;
-      context->SetLiteralToTrue(literal);
+      if (!context->SetLiteralToTrue(literal)) return true;
       continue;
     }
     context->tmp_literals.push_back(literal);
@@ -535,6 +561,7 @@ bool PresolveBoolAnd(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveAtMostOne(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   CHECK(!HasEnforcementLiteral(*ct));
 
   bool changed = false;
@@ -544,7 +571,7 @@ bool PresolveAtMostOne(ConstraintProto* ct, PresolveContext* context) {
       context->UpdateRuleStats("at_most_one: satisfied");
       for (const int other : ct->at_most_one().literals()) {
         if (other == literal) continue;
-        context->SetLiteralToFalse(other);
+        if (!context->SetLiteralToFalse(other)) return true;
       }
       return RemoveConstraint(ct, context);
     }
@@ -567,6 +594,7 @@ bool PresolveAtMostOne(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveIntMax(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (ct->int_max().vars().empty()) {
     return MarkConstraintAsFalse(ct, context);
   }
@@ -619,7 +647,10 @@ bool PresolveIntMax(ConstraintProto* ct, PresolveContext* context) {
       infered_domain = infered_domain.UnionWith(
           context->DomainOf(ref).IntersectionWith({target_min, target_max}));
     }
-    domain_reduced |= context->IntersectDomainWith(target_ref, infered_domain);
+    if (!context->IntersectDomainWith(target_ref, infered_domain,
+                                      &domain_reduced)) {
+      return true;
+    }
   }
 
   // Pass 2, update the argument domains. Filter them eventually.
@@ -628,8 +659,10 @@ bool PresolveIntMax(ConstraintProto* ct, PresolveContext* context) {
   target_max = context->MaxOf(target_ref);
   for (const int ref : ct->int_max().vars()) {
     if (!HasEnforcementLiteral(*ct)) {
-      domain_reduced |=
-          context->IntersectDomainWith(ref, Domain(kint64min, target_max));
+      if (!context->IntersectDomainWith(ref, Domain(kint64min, target_max),
+                                        &domain_reduced)) {
+        return true;
+      }
     }
     if (context->MaxOf(ref) >= target_min) {
       ct->mutable_int_max()->set_vars(new_size++, ref);
@@ -668,6 +701,7 @@ bool PresolveIntMax(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveIntMin(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   const auto copy = ct->int_min();
   ct->mutable_int_max()->set_target(NegatedRef(copy.target()));
   for (const int ref : copy.vars()) {
@@ -677,6 +711,7 @@ bool PresolveIntMin(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveIntProd(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (HasEnforcementLiteral(*ct)) return false;
 
   if (ct->int_prod().vars_size() == 2) {
@@ -709,7 +744,9 @@ bool PresolveIntProd(ConstraintProto* ct, PresolveContext* context) {
   }
 
   // This is a bool constraint!
-  context->IntersectDomainWith(target_ref, Domain(0, 1));
+  if (!context->IntersectDomainWith(target_ref, Domain(0, 1)) ) {
+    return false;
+  }
   context->UpdateRuleStats("int_prod: all Boolean.");
   {
     ConstraintProto* new_ct = context->working_model->add_constraints();
@@ -731,12 +768,15 @@ bool PresolveIntProd(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveIntDiv(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   // For now, we only presolve the case where the divisor is constant.
   const int target = ct->int_div().target();
   const int ref_x = ct->int_div().vars(0);
   const int ref_div = ct->int_div().vars(1);
   if (!RefIsPositive(target) || !RefIsPositive(ref_x) ||
-      !RefIsPositive(ref_div) || !context->IsFixed(ref_div)) {
+      !RefIsPositive(ref_div) || context->DomainIsEmpty(ref_div) ||
+      !context->IsFixed(ref_div)) {
     return false;
   }
 
@@ -744,10 +784,17 @@ bool PresolveIntDiv(ConstraintProto* ct, PresolveContext* context) {
   if (divisor == 1) {
     context->UpdateRuleStats("TODO int_div: rewrite to equality");
   }
-  if (context->IntersectDomainWith(
-          target, context->DomainOf(ref_x).DivisionBy(divisor))) {
-    context->UpdateRuleStats(
-        "int_div: updated domain of target in target = X / cte");
+  bool domain_modified = false;
+  if (context->IntersectDomainWith(target,
+                                   context->DomainOf(ref_x).DivisionBy(divisor),
+                                   &domain_modified)) {
+    if (domain_modified) {
+      context->UpdateRuleStats(
+          "int_div: updated domain of target in target = X / cte");
+    }
+  } else {
+    // Model is unsat.
+    return false;
   }
 
   // TODO(user): reduce the domain of X by introducing an
@@ -802,6 +849,8 @@ bool ExploitEquivalenceRelations(ConstraintProto* ct,
 }
 
 bool PresolveLinear(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   bool var_constraint_graph_changed = false;
   Domain rhs = ReadDomainFromProto(ct->linear());
 
@@ -949,10 +998,14 @@ bool PresolveLinear(ConstraintProto* ct, PresolveContext* context) {
     context->UpdateRuleStats("linear: size one");
     const int var = PositiveRef(arg.vars(0));
     if (coeff == 1) {
-      context->IntersectDomainWith(var, rhs);
+      if (!context->IntersectDomainWith(var, rhs)) {
+        return true;
+      }
     } else {
       DCHECK_EQ(coeff, -1);  // Because of the GCD above.
-      context->IntersectDomainWith(var, rhs.Negation());
+      if (!context->IntersectDomainWith(var, rhs.Negation())) {
+        return true;
+      }
     }
     return RemoveConstraint(ct, context);
   }
@@ -1027,7 +1080,12 @@ bool PresolveLinear(ConstraintProto* ct, PresolveContext* context) {
       new_domain = left_domains[i]
                        .AdditionWith(right_domain)
                        .InverseMultiplicationBy(-arg.coeffs(i));
-      if (context->IntersectDomainWith(arg.vars(i), new_domain)) {
+      bool domain_modified = false;
+      if (!context->IntersectDomainWith(arg.vars(i), new_domain,
+                                        &domain_modified)) {
+        return true;
+      }
+      if (domain_modified) {
         new_bounds = true;
       }
     }
@@ -1064,6 +1122,7 @@ bool PresolveLinear(ConstraintProto* ct, PresolveContext* context) {
 }
 
 void ExtractAtMostOneFromLinear(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return;
   if (HasEnforcementLiteral(*ct)) return;
   const Domain domain = ReadDomainFromProto(ct->linear());
 
@@ -1117,6 +1176,8 @@ void ExtractAtMostOneFromLinear(ConstraintProto* ct, PresolveContext* context) {
 // Convert some linear constraint involving only Booleans to their Boolean
 // form.
 bool PresolveLinearOnBooleans(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   // TODO(user): the alternative to mark any newly created constraints might
   // be better.
   if (gtl::ContainsKey(context->affine_constraints, ct)) return false;
@@ -1256,19 +1317,29 @@ bool PresolveLinearOnBooleans(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveInterval(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (!ct->enforcement_literal().empty()) return false;
   const int start = ct->interval().start();
   const int end = ct->interval().end();
   const int size = ct->interval().size();
   bool changed = false;
-  changed |= context->IntersectDomainWith(
-      end, context->DomainOf(start).AdditionWith(context->DomainOf(size)));
-  changed |= context->IntersectDomainWith(
-      start,
-      context->DomainOf(end).AdditionWith(context->DomainOf(size).Negation()));
-  changed |= context->IntersectDomainWith(
-      size,
-      context->DomainOf(end).AdditionWith(context->DomainOf(start).Negation()));
+  if (!context->IntersectDomainWith(
+          end, context->DomainOf(start).AdditionWith(context->DomainOf(size)),
+          &changed)) {
+    return false;
+  }
+  if (!context->IntersectDomainWith(start,
+                                    context->DomainOf(end).AdditionWith(
+                                        context->DomainOf(size).Negation()),
+                                    &changed)) {
+    return false;
+  }
+  if (!context->IntersectDomainWith(size,
+                                    context->DomainOf(end).AdditionWith(
+                                        context->DomainOf(start).Negation()),
+                                    &changed)) {
+    return false;
+  }
   if (changed) {
     context->UpdateRuleStats("interval: reduced domains");
   }
@@ -1288,6 +1359,8 @@ bool PresolveInterval(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveElement(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   const int index_ref = ct->element().index();
   const int target_ref = ct->element().target();
 
@@ -1300,9 +1373,10 @@ bool PresolveElement(ConstraintProto* ct, PresolveContext* context) {
 
   bool all_included_in_target_domain = true;
   bool reduced_index_domain = false;
-  if (context->IntersectDomainWith(index_ref,
-                                   Domain(0, ct->element().vars_size() - 1))) {
-    reduced_index_domain = true;
+  if (!context->IntersectDomainWith(index_ref,
+                                    Domain(0, ct->element().vars_size() - 1),
+                                    &reduced_index_domain)) {
+    return false;
   }
 
   Domain infered_domain;
@@ -1316,6 +1390,11 @@ bool PresolveElement(ConstraintProto* ct, PresolveContext* context) {
       const Domain domain = context->DomainOf(ref);
       if (domain.IntersectionWith(target_domain).IsEmpty()) {
         context->IntersectDomainWith(index_ref, Domain(value).Complement());
+        bool domain_modified = false;
+        if (!context->IntersectDomainWith(
+                index_ref, Domain(value).Complement(), &domain_modified)) {
+          return false;
+        }
         reduced_index_domain = true;
       } else {
         ++num_vars;
@@ -1334,8 +1413,12 @@ bool PresolveElement(ConstraintProto* ct, PresolveContext* context) {
   if (reduced_index_domain) {
     context->UpdateRuleStats("element: reduced index domain");
   }
-  if (context->IntersectDomainWith(target_ref, infered_domain)) {
-    if (context->DomainOf(target_ref).IsEmpty()) return true;
+  bool domain_modified = false;
+  if (!context->IntersectDomainWith(target_ref, infered_domain,
+                                    &domain_modified)) {
+    return true;
+  }
+  if (domain_modified) {
     context->UpdateRuleStats("element: reduced target domain");
   }
 
@@ -1376,6 +1459,7 @@ bool PresolveElement(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveTable(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (HasEnforcementLiteral(*ct)) return false;
   if (ct->table().negated()) return false;
   if (ct->table().vars().empty()) {
@@ -1429,9 +1513,13 @@ bool PresolveTable(ConstraintProto* ct, PresolveContext* context) {
   bool changed = false;
   for (int j = 0; j < num_vars; ++j) {
     const int ref = ct->table().vars(j);
-    changed |= context->IntersectDomainWith(
-        PositiveRef(ref), Domain::FromValues(std::vector<int64>(
-                              new_domains[j].begin(), new_domains[j].end())));
+    if (!context->IntersectDomainWith(
+            PositiveRef(ref),
+            Domain::FromValues(std::vector<int64>(new_domains[j].begin(),
+                                                  new_domains[j].end())),
+            &changed)) {
+      return true;
+    }
   }
   if (changed) {
     context->UpdateRuleStats("table: reduced variable domains");
@@ -1487,6 +1575,7 @@ bool PresolveTable(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveAllDiff(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (HasEnforcementLiteral(*ct)) return false;
   const int size = ct->all_diff().vars_size();
   if (size == 0) {
@@ -1512,6 +1601,8 @@ bool PresolveAllDiff(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveNoOverlap(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   const NoOverlapConstraintProto& proto = ct->no_overlap();
 
   // Filter absent intervals.
@@ -1538,6 +1629,8 @@ bool PresolveNoOverlap(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveCumulative(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
+
   const CumulativeConstraintProto& proto = ct->cumulative();
 
   // Filter absent intervals.
@@ -1599,13 +1692,16 @@ bool PresolveCumulative(ConstraintProto* ct, PresolveContext* context) {
         return false;
       } else {
         CHECK_EQ(ct.enforcement_literal().size(), 1);
-        context->SetLiteralToFalse(ct.enforcement_literal(0));
+        if (!context->SetLiteralToFalse(ct.enforcement_literal(0))) return true;
       }
       return false;
     } else if (demand_max > capacity) {
       if (ct.enforcement_literal().empty()) {
         context->UpdateRuleStats("cumulative: demand_max exceeds capacity.");
-        context->IntersectDomainWith(demand_ref, Domain(kint64min, capacity));
+        if (!context->IntersectDomainWith(demand_ref,
+                                          Domain(kint64min, capacity))) {
+          return true;
+        }
       } else {
         // TODO(user): we abort because we cannot convert this to a no_overlap
         // for instance.
@@ -1640,6 +1736,7 @@ bool PresolveCumulative(ConstraintProto* ct, PresolveContext* context) {
 }
 
 bool PresolveCircuit(ConstraintProto* ct, PresolveContext* context) {
+  if (context->is_unsat) return false;
   if (HasEnforcementLiteral(*ct)) return false;
   CircuitConstraintProto& proto = *ct->mutable_circuit();
 
@@ -1668,7 +1765,7 @@ bool PresolveCircuit(ConstraintProto* ct, PresolveContext* context) {
       if (refs.size() == 1) {
         if (!context->LiteralIsTrue(refs.front())) {
           ++num_fixed_at_true;
-          context->SetLiteralToTrue(refs.front());
+          if (!context->SetLiteralToTrue(refs.front())) return true;
         }
         continue;
       }
@@ -1686,7 +1783,7 @@ bool PresolveCircuit(ConstraintProto* ct, PresolveContext* context) {
       if (num_true > 0) {
         for (const int ref : refs) {
           if (ref != true_ref) {
-            context->SetLiteralToFalse(ref);
+            if (!context->SetLiteralToFalse(ref)) return true;
           }
         }
       }
@@ -1755,9 +1852,9 @@ bool PresolveCircuit(ConstraintProto* ct, PresolveContext* context) {
       for (int i = 0; i < num_arcs; ++i) {
         if (visited[proto.tails(i)]) continue;
         if (proto.tails(i) == proto.heads(i)) {
-          context->SetLiteralToTrue(proto.literals(i));
+          if (!context->SetLiteralToTrue(proto.literals(i))) return true;
         } else {
-          context->SetLiteralToFalse(proto.literals(i));
+          if (!context->SetLiteralToFalse(proto.literals(i))) return true;
         }
       }
       context->UpdateRuleStats("circuit: fully specified.");
@@ -1898,7 +1995,7 @@ void Probe(PresolveContext* context) {
     const int var = m.GetProtoVariableFromBooleanVariable(l.Variable());
     if (var >= 0) {
       const int ref = l.IsPositive() ? var : NegatedRef(var);
-      context->SetLiteralToTrue(ref);
+      if (!context->SetLiteralToTrue(ref)) return;
     }
   }
 
@@ -1910,7 +2007,9 @@ void Probe(PresolveContext* context) {
     if (!m.IsBoolean(var)) {
       const Domain new_domain =
           integer_trail->InitialVariableDomain(m.Integer(var));
-      context->IntersectDomainWith(var, new_domain);
+      if (!context->IntersectDomainWith(var, new_domain)) {
+        return;
+      }
       continue;
     }
 
@@ -2343,6 +2442,7 @@ void MergeNoOverlapConstraints(PresolveContext* context) {
 }
 
 bool PresolveOneConstraint(int c, PresolveContext* context) {
+  if (context->is_unsat) return false;
   ConstraintProto* ct = context->working_model->mutable_constraints(c);
 
   // Generic presolve to exploit variable/literal equivalence.
@@ -2463,13 +2563,9 @@ void PresolveToFixPoint(PresolveContext* context) {
     // TODO(user): Avoid reprocessing the constraints that changed the variables
     // with the use of timestamp.
     const int old_queue_size = queue.size();
+    if (context->is_unsat) return;
     for (const int v : context->modified_domains.PositionsSetAtLeastOnce()) {
-      if (context->DomainIsEmpty(v)) {
-        context->is_unsat = true;
-        break;
-      }
       if (context->IsFixed(v)) context->ExploitFixedDomain(v);
-
       for (const int c : context->var_to_constraints[v]) {
         if (c >= 0 && !in_queue[c]) {
           in_queue[c] = true;
@@ -2551,7 +2647,12 @@ void RemoveUnusedEquivalentVariables(PresolveContext* context) {
       const Domain implied = context->DomainOf(var)
                                  .AdditionWith({-r.offset, -r.offset})
                                  .InverseMultiplicationBy(r.coeff);
-      if (context->IntersectDomainWith(r.representative, implied)) {
+      bool domain_modified = false;
+      if (!context->IntersectDomainWith(r.representative, implied,
+                                        &domain_modified)) {
+        return;
+      }
+      if (domain_modified) {
         LOG(WARNING) << "Domain of " << r.representative
                      << " was not fully propagated using the affine relation "
                      << "(representative =" << r.representative
