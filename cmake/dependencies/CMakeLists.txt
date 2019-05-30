@@ -104,6 +104,9 @@ if(BUILD_Protobuf)
     TAG
       "v3.7.1"
     CMAKE_ARGS
+      -Dprotobuf_BUILD_CONFORMANCE:BOOL=OFF
+      -Dprotobuf_BUILD_EXAMPLES:BOOL=OFF
+      -Dprotobuf_BUILD_TESTS:BOOL=OFF
       "SOURCE_SUBDIR cmake"
   )
 endif()
