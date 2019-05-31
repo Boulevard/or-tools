@@ -7,6 +7,11 @@ if(POLICY CMP0068)
   cmake_policy(SET CMP0068 NEW)
 endif()
 
+# Existing variables override default values from OPTION
+if(POLICY CMP0077)
+  cmake_policy(SET CMP0077 NEW)
+endif()
+
 include(utils)
 set_version(VERSION)
 
