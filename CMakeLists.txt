@@ -7,6 +7,11 @@ if(POLICY CMP0068)
   cmake_policy(SET CMP0068 NEW)
 endif()
 
+# Existing variables override default values from OPTION
+if(POLICY CMP0077)
+  cmake_policy(SET CMP0077 NEW)
+endif()
+
 if(POLICY CMP0078)
   cmake_policy(SET CMP0078 OLD)
 endif()
@@ -96,7 +101,7 @@ if (USE_XPRESS)
 	if (APPLE)
 		message(FATAL_ERROR "XPRESS not yet supported on MACOS")
 	endif()
-	
+
 	message(STATUS "XPRESS: configuring makefiles")
 	if (NOT XPRESSDIR)
 		set(XPRESSDIR $ENV{XPRESSDIR})
@@ -119,7 +124,7 @@ if (USE_CPLEX)
 	elseif(UNIX)
 		message(FATAL_ERROR "CPLEX not yet supported on LINUX")
 	endif()
-	
+
 	message(STATUS "CPLEX: configuring makefiles")
 	if (NOT CPLEXDIR)
 		set(CPLEXDIR $ENV{CPLEXDIR})
