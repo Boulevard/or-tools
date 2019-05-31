@@ -81,7 +81,7 @@ message(STATUS "Build Cbc: ${BUILD_Cbc}")
 
 # Build Needed dependencies
 add_subdirectory(cmake/dependencies dependencies)
-list(APPEND CMAKE_PREFIX_PATH ${CMAKE_BINARY_DIR}/dependencies/install)
+list(APPEND CMAKE_PREFIX_PATH ${CMAKE_CURRENT_BINARY_DIR}/dependencies/install)
 
 include(CTest)
 
