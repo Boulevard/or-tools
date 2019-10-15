@@ -193,10 +193,6 @@ foreach(SUBPROJECT
   add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}::${SUBPROJECT})
 endforeach()
 
-if(BUILD_TESTING)
-  add_subdirectory(examples/cpp)
-endif()
-
 # Install rules
 include(GNUInstallDirs)
 
