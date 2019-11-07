@@ -156,6 +156,12 @@ class Domain {
   int64 Max() const;
 
   /**
+   * Returns true iff the domain is reduced to a single value.
+   * The domain must not be empty.
+   */
+  bool IsFixed() const;
+
+  /**
    * Returns true iff value is in Domain.
    */
   bool Contains(int64 value) const;
