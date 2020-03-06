@@ -46,12 +46,7 @@ function(get_version_from_git VERSION_MAJOR VERSION_MINOR VERSION_PATCH)
 endfunction()
 
 function(set_version VERSION)
-  get_filename_component(GIT_DIR ".git" ABSOLUTE)
-  if(EXISTS ${GIT_DIR})
-    get_version_from_git(MAJOR MINOR PATCH)
-  else()
-    get_version_from_file(MAJOR MINOR PATCH)
-  endif()
+  get_version_from_file(MAJOR MINOR PATCH)
   set(${VERSION} "${MAJOR}.${MINOR}.${PATCH}" PARENT_SCOPE)
 endfunction()
 
