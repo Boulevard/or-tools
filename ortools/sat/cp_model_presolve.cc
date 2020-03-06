@@ -1126,13 +1126,22 @@ bool CpModelPresolver::PresolveSmallLinear(ConstraintProto* ct) {
     return false;
   }
 
-  // Empty constraint?
-  if (ct->linear().vars().empty()) {
-    context_->UpdateRuleStats("linear: empty");
+  {
+    const auto lhs = ct->linear().vars();
     const Domain rhs = ReadDomainFromProto(ct->linear());
-    if (rhs.Contains(0)) {
-      return RemoveConstraint(ct);
-    } else {
+
+    // Empty constraint on lhs?
+    if (lhs.empty()) {
+      context_->UpdateRuleStats("linear: empty");
+      if (rhs.Contains(0)) {
+        return RemoveConstraint(ct);
+      } else {
+        return MarkConstraintAsFalse(ct);
+      }
+    }
+
+    // Empty constraint on rhs?
+    if (rhs.IsEmpty()) {
       return MarkConstraintAsFalse(ct);
     }
   }
