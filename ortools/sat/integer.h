@@ -537,10 +537,11 @@ class IntegerTrail : public SatPropagator {
       : SatPropagator("IntegerTrail"),
         domains_(model->GetOrCreate<IntegerDomains>()),
         encoder_(model->GetOrCreate<IntegerEncoder>()),
-        trail_(model->GetOrCreate<Trail>()) {
+        trail_(model->GetOrCreate<Trail>()),
+        parameters_(*model->GetOrCreate<SatParameters>()) {
     model->GetOrCreate<SatSolver>()->AddPropagator(this);
   }
-  ~IntegerTrail() final {}
+  ~IntegerTrail() final;
 
   // SatPropagator interface. These functions make sure the current bounds
   // information is in sync with the current solver literal trail. Any
@@ -564,7 +565,13 @@ class IntegerTrail : public SatPropagator {
   void ReserveSpaceForNumVariables(int num_vars);
 
   // Adds a new integer variable. Adding integer variable can only be done when
-  // the decision level is zero (checked). The given bounds are INCLUSIVE.
+  // the decision level is zero (checked). The given bounds are INCLUSIVE and
+  // must not cross.
+  //
+  // Note on integer overflow: 'upper_bound - lower_bound' must fit on an int64,
+  // this is DCHECKed. More generally, depending on the constraints that are
+  // added, the bounds magnitude must be small enough to satisfy each constraint
+  // overflow precondition.
   IntegerVariable AddIntegerVariable(IntegerValue lower_bound,
                                      IntegerValue upper_bound);
 
@@ -823,6 +830,11 @@ class IntegerTrail : public SatPropagator {
   // used from within a LazyReasonFunction().
   int FindTrailIndexOfVarBefore(IntegerVariable var, int threshold) const;
 
+  // Basic heuristic to detect when we are in a propagation loop, and suggest
+  // a good variable to branch on (taking the middle value) to get out of it.
+  bool InPropagationLoop() const;
+  IntegerVariable MostPropagatedVarWithLargeDomain() const;
+
  private:
   // Used for DHECKs to validate the reason given to the public functions above.
   // Tests that all Literal are false. Tests that all IntegerLiteral are true.
@@ -988,6 +1000,7 @@ class IntegerTrail : public SatPropagator {
   int64 num_enqueues_ = 0;
   int64 num_untrails_ = 0;
   int64 num_level_zero_enqueues_ = 0;
+  mutable int64 num_decisions_to_break_loop_ = 0;
 
   std::vector<SparseBitset<IntegerVariable>*> watchers_;
   std::vector<ReversibleInterface*> reversible_classes_;
@@ -995,6 +1008,7 @@ class IntegerTrail : public SatPropagator {
   IntegerDomains* domains_;
   IntegerEncoder* encoder_;
   Trail* trail_;
+  const SatParameters& parameters_;
 
   DISALLOW_COPY_AND_ASSIGN(IntegerTrail);
 };

@@ -191,6 +191,13 @@ std::function<LiteralIndex()> ConstructSearchStrategy(
         decisions.push_back(var);
       }
     }
+
+    // In some corner cases (where there is propagation loops) the objective
+    // might not have been propagated correctly, so is is important to try to
+    // fix it.
+    if (objective_var != kNoIntegerVariable) {
+      decisions.push_back(objective_var);
+    }
     default_search_strategy =
         FirstUnassignedVarAtItsMinHeuristic(decisions, model);
   }
